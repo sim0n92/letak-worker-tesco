@@ -1,0 +1,6 @@
+# Runtime dependencies for letak-worker-tesco.
+# The protocol wrapper in src/main.py uses only the Python standard library.
+# Add scraping/HTTP/parsing libs here as the implementation lands, e.g.:
+#   requests>=2.32
+#   beautifulsoup4>=4.12
+#   playwright>=1.44
