@@ -28,6 +28,7 @@ Page model (https://www.tesco.sk/akciove-ponuky/letaky-a-katalogy):
 from __future__ import annotations
 
 import json
+from datetime import date, datetime, timedelta, timezone
 import re
 import urllib.request
 
@@ -60,6 +61,50 @@ def fetch(url: str = DEFAULT_URL, timeout: int = 30) -> str:
     return raw.decode(charset, errors="replace")
 
 
+# The page's own data source (APOLLO_URL in __NEXT_DATA__). Unlike www.tesco.sk it is NOT behind Akamai Bot
+# Manager's TLS fingerprinting: from a Linux container the page answers 403 to urllib and curl alike
+# (2026-07..10, every ProcMon run failed), the API answers 200.
+API_URL = "https://api.prod.retail.tesco.com/marketing/leaflets-be/graphql"
+_LEAFLETS_QUERY = """query getValidLeafletList($country: CountryCode!, $currentDate: DateTime!, $storeType: LeafletType) {
+  leaflets(options: {filter: {country: {eq: $country}, validTo: {after: $currentDate}, type: {eq: $storeType}}}) {
+    items { id slug leafletUrl validFrom validTo type }
+    totalItems
+  }
+}"""
+
+
+def fetch_api(api_url: str = API_URL, current_date: str = "", timeout: int = 30) -> dict:
+    """The currently valid SK leaflets from the GraphQL API (a file:// URL is read as the saved response)."""
+    if api_url.startswith("file:"):
+        with urllib.request.urlopen(api_url, timeout=timeout) as resp:
+            return json.loads(resp.read().decode("utf-8"))
+    body = json.dumps({"operationName": "getValidLeafletList", "query": _LEAFLETS_QUERY,
+                       "variables": {"country": "sk", "currentDate": current_date}}).encode("utf-8")
+    req = urllib.request.Request(api_url, data=body, method="POST", headers={
+        "Content-Type": "application/json", "User-Agent": _USER_AGENT,
+        "Origin": "https://www.tesco.sk", "Referer": DEFAULT_URL,
+    })
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        return json.loads(resp.read().decode("utf-8"))
+
+
+def parse_api(data: dict) -> list[dict]:
+    """GraphQL response -> leaflets {id, type, slug, validFrom, validTo, pdfUrl}."""
+    if data.get("errors"):
+        raise ValueError(f"GraphQL errors: {data['errors'][0].get('message')}")
+    items = (((data.get("data") or {}).get("leaflets")) or {}).get("items")
+    if items is None:
+        raise ValueError("no data.leaflets.items in the API response")
+    return [{
+        "id": it.get("id"),
+        "type": it.get("type"),
+        "slug": it.get("slug"),
+        "validFrom": _iso_date(it.get("validFrom")),
+        "validTo": _iso_date(it.get("validTo")),
+        "pdfUrl": it.get("leafletUrl"),
+    } for it in items if it.get("leafletUrl")]
+
+
 def leaflet_key(type_: str | None, valid_from: str | None,
                 valid_to: str | None) -> str:
     """Stable novelty key: leaflet type + validity range.
@@ -73,11 +118,27 @@ def leaflet_key(type_: str | None, valid_from: str | None,
     return f"{type_}|{valid_from}|{valid_to}"
 
 
+def _last_sunday(year: int, month: int) -> date:
+    d = date(year, month, 31)
+    return d - timedelta(days=(d.weekday() + 1) % 7)
+
+
 def _iso_date(dt: str | None) -> str | None:
-    """'2026-07-01T06:00:00.000Z' -> '2026-07-01'."""
+    """'2026-07-01T06:00:00.000Z' -> '2026-07-01': the calendar date in Slovakia (CET/CEST), not in UTC —
+    a leaflet valid from local midnight starts at 22:00/23:00 UTC of the previous day."""
     if not dt or len(dt) < 10:
         return None
-    return dt[:10]
+    try:
+        t = datetime.fromisoformat(dt.replace("Z", "+00:00"))
+    except ValueError:
+        return dt[:10]
+    if t.tzinfo is None:
+        return t.date().isoformat()
+    t = t.astimezone(timezone.utc).replace(tzinfo=None)
+    # EU summer time: last Sunday of March 01:00 UTC .. last Sunday of October 01:00 UTC
+    summer = datetime.combine(_last_sunday(t.year, 3), datetime.min.time()) + timedelta(hours=1) <= t \
+        < datetime.combine(_last_sunday(t.year, 10), datetime.min.time()) + timedelta(hours=1)
+    return (t + timedelta(hours=2 if summer else 1)).date().isoformat()
 
 
 def _next_data(doc: str) -> dict:

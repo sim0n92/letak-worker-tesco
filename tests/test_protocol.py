@@ -149,6 +149,36 @@ def main() -> int:
         p = run(payload, log_dir=log_dir)
         check("no __NEXT_DATA__ -> exit 4", p.returncode == 4, f"rc={p.returncode}")
 
+    with tempfile.TemporaryDirectory() as tmp:
+        log_dir, out_file = str(Path(tmp) / "logs"), str(Path(tmp) / "out.json")
+        api = (ROOT / "tests" / "fixtures" / "tesco_api.json").as_uri()
+        # the GraphQL API is read first (file:// = a saved response)
+        p = run(json.dumps({"_action": "execute", "outputPath": out_file, "apiUrl": api, "types": ["hm"]}),
+                log_dir=log_dir)
+        lines = [json.loads(l) for l in p.stdout.splitlines() if l.strip()]
+        result = next((m["data"] for m in lines if m.get("type") == "result"), {})
+        check("API: exit 0 and the HM leaflet",
+              p.returncode == 0 and [lf["type"] for lf in result.get("leaflets", [])] == ["HM"],
+              f"rc={p.returncode} {result}")
+
+        # an empty catalogue is an error, not "Completed, 0 leaflets"
+        empty = Path(tmp) / "empty.json"
+        empty.write_text(json.dumps({"data": {"leaflets": {"items": [], "totalItems": 0}}}), encoding="utf-8")
+        p = run(json.dumps({"_action": "execute", "outputPath": out_file, "apiUrl": empty.as_uri()}),
+                log_dir=log_dir)
+        last = [json.loads(l) for l in p.stdout.splitlines() if l.strip()][-1]
+        check("API: no leaflets -> exit 4 NO_LEAFLETS", p.returncode == 4 and last.get("code") == "NO_LEAFLETS",
+              f"rc={p.returncode} {last}")
+
+        # a broken API falls back to the page
+        page = (ROOT / "tests" / "fixtures" / "tesco.html").as_uri()
+        p = run(json.dumps({"_action": "execute", "outputPath": out_file, "apiUrl": "http://127.0.0.1:9/nope",
+                            "pageUrl": page}), log_dir=log_dir)
+        lines = [json.loads(l) for l in p.stdout.splitlines() if l.strip()]
+        result = next((m["data"] for m in lines if m.get("type") == "result"), {})
+        check("API down -> page fallback", p.returncode == 0 and result.get("count") == 2,
+              f"rc={p.returncode} {result}")
+
     print("\n" + ("All tests passed" if failures == 0 else f"{failures} test(s) failed"))
     return 1 if failures else 0
 

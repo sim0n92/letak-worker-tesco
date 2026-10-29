@@ -3,6 +3,7 @@
 
     python tests/test_parser.py
 """
+import json
 import sys
 from pathlib import Path
 
@@ -51,6 +52,23 @@ def main() -> int:
 
     check("leaflet_key format", tesco.leaflet_key("HM", "2026-07-01", "2026-07-07")
           == "HM|2026-07-01|2026-07-07")
+
+    # The GraphQL API (the production source since 2026-10): saved response of 2026-10-29
+    api = tesco.parse_api(json.loads((FIXTURE.parent / "tesco_api.json").read_text(encoding="utf-8")))
+    check("API: 4 leaflets", len(api) == 4, str([lf["type"] for lf in api]))
+    hm = next((lf for lf in api if lf["type"] == "HM"), {})
+    check("API: HM validity and PDF", (hm.get("validFrom"), hm.get("validTo")) == ("2026-10-28", "2026-11-03")
+          and hm.get("pdfUrl", "").endswith("_SK_HM-CHM.pdf"), str(hm))
+    try:
+        tesco.parse_api({"errors": [{"message": "boom"}]})
+        check("API: GraphQL errors raise", False)
+    except ValueError:
+        check("API: GraphQL errors raise", True)
+
+    # Validity is the Slovak calendar date, not the UTC one
+    check("local date: CEST midnight", tesco._iso_date("2026-10-04T22:00:00.000Z") == "2026-10-05")
+    check("local date: CET end of day", tesco._iso_date("2026-11-03T22:59:59.000Z") == "2026-11-03")
+    check("local date: CEST end of day", tesco._iso_date("2026-07-07T21:59:59.000Z") == "2026-07-07")
 
     print("\n" + ("All parser tests passed" if not failures else f"{failures} failed"))
     return 1 if failures else 0

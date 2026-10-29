@@ -23,7 +23,7 @@ import logging
 import os
 import sys
 import threading
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -242,31 +242,43 @@ class LetakWorker(ProcessClass):
                 code="INVALID_INPUT", exit_code=EXIT_INPUT)
 
         url = input_data.get("pageUrl") or tesco.DEFAULT_URL
+        # the GraphQL API first (www.tesco.sk answers 403 from a Linux container); the page is the fallback.
+        # An explicit pageUrl alone (tests, a page override) reads the page only.
+        api_url = input_data.get("apiUrl") or (None if input_data.get("pageUrl") else tesco.API_URL)
         known = set(input_data.get("knownLeaflets") or [])
-        self.logger.info("Scrape requested -> %s (known=%d)", url, len(known))
+        self.logger.info("Scrape requested -> %s (known=%d)", api_url or url, len(known))
 
-        # 1. Fetch the leaflet page.
-        self.report(10, f"Fetching {url}")
-        try:
-            doc = tesco.fetch(url)
-        except Exception as e:  # network / upstream -> dependency error (exit 4)
-            raise ManagedError(
-                f"Failed to fetch leaflet page: {e}",
-                code="FETCH_FAILED", exit_code=EXIT_DEPENDENCY) from e
-
+        leaflets, errors = None, []
+        if api_url:
+            self.report(10, f"Querying {api_url}")
+            try:
+                now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000Z")
+                leaflets = tesco.parse_api(tesco.fetch_api(api_url, now))
+            except Exception as e:
+                self.logger.warning("Leaflet API failed, falling back to the page: %s", e)
+                errors.append(f"API: {e}")
         if self.terminate_requested.is_set():
-            raise ManagedError("Terminated during fetch", code="TERMINATED",
-                               exit_code=EXIT_ERROR)
-
-        # 2. Parse leaflets from the __NEXT_DATA__ Apollo cache.
-        self.report(50, "Parsing leaflets")
-        try:
-            leaflets = tesco.parse_leaflets(doc)
-        except ValueError as e:  # markup changed / no __NEXT_DATA__ -> dependency error
-            raise ManagedError(
-                f"Failed to parse leaflet page: {e}",
-                code="PARSE_FAILED", exit_code=EXIT_DEPENDENCY) from e
+            raise ManagedError("Terminated during fetch", code="TERMINATED", exit_code=EXIT_ERROR)
+        if leaflets is None:
+            self.report(30, f"Fetching {url}")
+            try:
+                doc = tesco.fetch(url)
+            except Exception as e:  # network / upstream -> dependency error (exit 4)
+                raise ManagedError(
+                    f"Failed to fetch leaflet page: {e}" + (f" (after {'; '.join(errors)})" if errors else ""),
+                    code="FETCH_FAILED", exit_code=EXIT_DEPENDENCY) from e
+            self.report(50, "Parsing leaflets")
+            try:
+                leaflets = tesco.parse_leaflets(doc)
+            except ValueError as e:  # markup changed / no __NEXT_DATA__ -> dependency error
+                raise ManagedError(
+                    f"Failed to parse leaflet page: {e}",
+                    code="PARSE_FAILED", exit_code=EXIT_DEPENDENCY) from e
         self.logger.info("Found %d leaflet(s)", len(leaflets))
+        if not leaflets:
+            # Tesco always has a current leaflet: none = the API or the page changed
+            raise ManagedError("No leaflets found - API or page changed?", code="NO_LEAFLETS",
+                               exit_code=EXIT_DEPENDENCY)
 
         # 3. Represent each leaflet as {type, from, to, url}, url = the PDF link.
         items = [

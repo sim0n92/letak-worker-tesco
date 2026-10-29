@@ -3,7 +3,7 @@
   "specVersion": "1.0",
   "type": "stdin",
   "name": "letak-worker-tesco",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Detects Tesco SK leaflets (hypermarket/supermarket) and returns new leaflet URLs.",
   "author": "Fancysoft / 0ics",
   "repository": "https://github.com/sim0n92/letak-worker-tesco",
@@ -36,7 +36,11 @@
           },
           "pageUrl": {
             "type": "string",
-            "description": "Override for the leaflet page URL. Defaults to https://www.tesco.sk/akciove-ponuky/letaky-a-katalogy"
+            "description": "Override for the leaflet page URL (the fallback source). Defaults to https://www.tesco.sk/akciove-ponuky/letaky-a-katalogy. Given alone (no apiUrl) only the page is read."
+          },
+          "apiUrl": {
+            "type": "string",
+            "description": "Override for the leaflet GraphQL API, the primary source (a file:// URL is read as a saved response). Defaults to https://api.prod.retail.tesco.com/marketing/leaflets-be/graphql"
           },
           "customData": {
             "type": "object",
