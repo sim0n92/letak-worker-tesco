@@ -25,15 +25,20 @@ the caller-supplied `knownLeaflets` list. Stateless; metadata + URLs only
 ## Where to work
 
 - Page fetch + parsing lives in `src/tesco.py` (pure functions, unit-tested
-  against `tests/fixtures/tesco.html`). The protocol plumbing is in
+  against `tests/fixtures/tesco.html` and `tests/fixtures/tesco_api.json`). The protocol plumbing is in
   `src/main.py` (`ProcessClass`); `LetakWorker.execute()` wires the two.
-- The leaflet catalogue is NOT scraped from HTML tiles — it's read straight
-  out of the Next.js `<script id="__NEXT_DATA__">` JSON blob
-  (`props.pageProps.__APOLLO_STATE__`, every `Leaflet:<id>` entity). If Tesco
-  migrates off Next.js/Apollo this parser needs a rewrite.
-- The site sits behind Akamai Bot Manager: `fetch()` sends a realistic
-  `Accept`/`Accept-Language`/`Sec-Fetch-*` header set — a bare request with
-  only `User-Agent` gets a 403 from the edge before it reaches the app.
+- The leaflet catalogue comes from the site's own GraphQL API
+  (`tesco.API_URL`, query `getValidLeafletList`, country `sk`) — the primary
+  source since 2026-10. www.tesco.sk sits behind Akamai Bot Manager, which
+  fingerprints the TLS client: from a Linux container the page answers 403 to
+  urllib and curl alike (every ProcMon run failed 2026-07..10), the API answers 200.
+- Fallback: the page's Next.js `<script id="__NEXT_DATA__">` JSON blob
+  (`props.pageProps.__APOLLO_STATE__`, every `Leaflet:<id>` entity), with a
+  realistic `Accept`/`Sec-Fetch-*` header set. `pageUrl` alone (tests) reads
+  only the page.
+- Validity: `validFrom`/`validTo` are UTC instants; `_iso_date` turns them into
+  the Slovak calendar date (CET/CEST), not the UTC date.
+- No leaflets at all is `NO_LEAFLETS` (exit 4) — never "Completed, 0 leaflets".
 - Keep `manifest.json` input/output schemas in sync with `execute`.
 - If Tesco changes markup/data shape, refresh the fixture and keep parser
   tests green.
