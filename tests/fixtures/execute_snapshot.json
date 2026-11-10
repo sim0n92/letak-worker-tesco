@@ -1,0 +1,27 @@
+{
+  "result": {
+    "count": 1,
+    "hasNew": true,
+    "leaflets": [
+      {
+        "type": "SM",
+        "from": "2026-07-01",
+        "to": "2026-07-07",
+        "url": "https://digitalcontent.api.tesco.com/v2/media/dotcom-hu/f57e360a-5fe3-466b-99ca-10bb05088bc9/20260630074429640_2026_P18_SK_SM.pdf"
+      }
+    ]
+  },
+  "fileDoc": {
+    "types": null,
+    "hasNew": true,
+    "count": 1,
+    "leaflets": [
+      {
+        "type": "SM",
+        "from": "2026-07-01",
+        "to": "2026-07-07",
+        "url": "https://digitalcontent.api.tesco.com/v2/media/dotcom-hu/f57e360a-5fe3-466b-99ca-10bb05088bc9/20260630074429640_2026_P18_SK_SM.pdf"
+      }
+    ]
+  }
+}

@@ -28,6 +28,7 @@ from pathlib import Path
 from typing import Any
 
 import tesco
+import v11
 
 # --- Exit codes (spec section 4.7) ---------------------------------------
 EXIT_OK = 0
@@ -68,8 +69,9 @@ class ManagedError(Exception):
     """A handled error: emits {type:error} and exits with `exit_code`."""
 
     def __init__(self, message: str, *, code: str | None = None,
-                 exit_code: int = EXIT_ERROR, data: dict | None = None):
+                 exit_code: int = EXIT_ERROR, data: dict | None = None, status: int | None = None):
         super().__init__(message)
+        self.status = status          # upstream HTTP status, for v1.1 classification only
         self.code = code
         self.exit_code = exit_code
         self.data = data
@@ -196,6 +198,8 @@ class ProcessClass:
                 return self._handle_execute()
             if action == "terminate":
                 return self._handle_terminate()
+            if action in v11.ACTIONS:
+                return self._handle_v11(action)
             raise ManagedError(
                 f"Unknown action: {action!r}", code="UNKNOWN_ACTION",
                 exit_code=EXIT_INPUT)
@@ -215,6 +219,27 @@ class ProcessClass:
         self.report(100, "Done")
         self._emit_result(data)
         return EXIT_OK
+
+    def _handle_v11(self, action: str) -> int:
+        """Proc-protocol v1.1 actions: errors carry the three protocol codes, not the legacy ones."""
+        try:
+            if action == "spec":
+                self._emit_result(v11.spec())
+                return EXIT_OK
+            self._start_terminate_watcher()
+            problem = v11.input_problem(self._input_data)
+            if problem:
+                raise ManagedError(problem, code="INVALID_INPUT", exit_code=EXIT_INPUT)
+            data = self.v11_check(self._input_data) if action == "check" else self.v11_run(self._input_data)
+            self._emit_result(data)
+            return EXIT_OK
+        except ManagedError as e:
+            status = getattr(e, "status", None)
+            code = v11.classify_error(e.code, {"status": status} if status else None)
+            message = v11.error_message(str(e), status) if code == v11.SYSTEM_ERROR and status else str(e)
+            self.logger.error("%s (%s)", message, code)
+            self._emit_error(message, code, v11.error_data(code))
+            return e.exit_code
 
     def _handle_terminate(self) -> int:
         self.report(0, "Termination requested...")
@@ -248,48 +273,7 @@ class LetakWorker(ProcessClass):
         known = set(input_data.get("knownLeaflets") or [])
         self.logger.info("Scrape requested -> %s (known=%d)", api_url or url, len(known))
 
-        leaflets, errors = None, []
-        if api_url:
-            self.report(10, f"Querying {api_url}")
-            try:
-                now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000Z")
-                leaflets = tesco.parse_api(tesco.fetch_api(api_url, now))
-            except Exception as e:
-                self.logger.warning("Leaflet API failed, falling back to the page: %s", e)
-                errors.append(f"API: {e}")
-        if self.terminate_requested.is_set():
-            raise ManagedError("Terminated during fetch", code="TERMINATED", exit_code=EXIT_ERROR)
-        if leaflets is None:
-            self.report(30, f"Fetching {url}")
-            try:
-                doc = tesco.fetch(url)
-            except Exception as e:  # network / upstream -> dependency error (exit 4)
-                raise ManagedError(
-                    f"Failed to fetch leaflet page: {e}" + (f" (after {'; '.join(errors)})" if errors else ""),
-                    code="FETCH_FAILED", exit_code=EXIT_DEPENDENCY) from e
-            self.report(50, "Parsing leaflets")
-            try:
-                leaflets = tesco.parse_leaflets(doc)
-            except ValueError as e:  # markup changed / no __NEXT_DATA__ -> dependency error
-                raise ManagedError(
-                    f"Failed to parse leaflet page: {e}",
-                    code="PARSE_FAILED", exit_code=EXIT_DEPENDENCY) from e
-        self.logger.info("Found %d leaflet(s)", len(leaflets))
-        if not leaflets:
-            # Tesco always has a current leaflet: none = the API or the page changed
-            raise ManagedError("No leaflets found - API or page changed?", code="NO_LEAFLETS",
-                               exit_code=EXIT_DEPENDENCY)
-
-        # 3. Represent each leaflet as {type, from, to, url}, url = the PDF link.
-        items = [
-            {
-                "type": lf.get("type"),
-                "from": lf.get("validFrom"),
-                "to": lf.get("validTo"),
-                "url": lf["pdfUrl"],
-            }
-            for lf in leaflets if lf.get("pdfUrl")
-        ]
+        items = self._scan(input_data)
 
         # 4. Keep only leaflets that (a) match the optional type filter AND
         #    (b) are new. Novelty is decided by a STABLE key (type + validity
@@ -327,6 +311,73 @@ class LetakWorker(ProcessClass):
             "leaflets": matched,
             "fileSize": out.stat().st_size,
         }
+
+    def _scan(self, input_data: dict[str, Any]) -> list[dict]:
+        """Reads the GraphQL API (page as fallback): all current leaflets {type, from, to, url}.
+
+        Raises ManagedError with the legacy codes (FETCH_FAILED, PARSE_FAILED, NO_LEAFLETS, TERMINATED).
+        Shared by execute, check and run.
+        """
+        url = input_data.get("pageUrl") or tesco.DEFAULT_URL
+        # the GraphQL API first (www.tesco.sk answers 403 from a Linux container); the page is the fallback.
+        # An explicit pageUrl alone (tests, a page override) reads the page only.
+        api_url = input_data.get("apiUrl") or (None if input_data.get("pageUrl") else tesco.API_URL)
+
+        leaflets, errors = None, []
+        if api_url:
+            self.report(10, f"Querying {api_url}")
+            try:
+                now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000Z")
+                leaflets = tesco.parse_api(tesco.fetch_api(api_url, now))
+            except Exception as e:
+                self.logger.warning("Leaflet API failed, falling back to the page: %s", e)
+                errors.append(f"API: {e}")
+        if self.terminate_requested.is_set():
+            raise ManagedError("Terminated during fetch", code="TERMINATED", exit_code=EXIT_ERROR)
+        if leaflets is None:
+            self.report(30, f"Fetching {url}")
+            try:
+                doc = tesco.fetch(url)
+            except Exception as e:  # network / upstream -> dependency error (exit 4)
+                raise ManagedError(
+                    f"Failed to fetch leaflet page: {e}" + (f" (after {'; '.join(errors)})" if errors else ""),
+                    code="FETCH_FAILED", exit_code=EXIT_DEPENDENCY,
+                    status=getattr(e, "code", None) if isinstance(getattr(e, "code", None), int) else None) from e
+            self.report(50, "Parsing leaflets")
+            try:
+                leaflets = tesco.parse_leaflets(doc)
+            except ValueError as e:  # markup changed / no __NEXT_DATA__ -> dependency error
+                raise ManagedError(
+                    f"Failed to parse leaflet page: {e}",
+                    code="PARSE_FAILED", exit_code=EXIT_DEPENDENCY) from e
+        self.logger.info("Found %d leaflet(s)", len(leaflets))
+        if not leaflets:
+            # Tesco always has a current leaflet: none = the API or the page changed
+            raise ManagedError("No leaflets found - API or page changed?", code="NO_LEAFLETS",
+                               exit_code=EXIT_DEPENDENCY)
+
+        # 3. Represent each leaflet as {type, from, to, url}, url = the PDF link.
+        items = [
+            {
+                "type": lf.get("type"),
+                "from": lf.get("validFrom"),
+                "to": lf.get("validTo"),
+                "url": lf["pdfUrl"],
+            }
+            for lf in leaflets if lf.get("pdfUrl")
+        ]
+        return items
+
+    def v11_check(self, input_data: dict[str, Any]) -> dict[str, Any]:
+        self._scan(input_data)
+        return {"ok": True}
+
+    def v11_run(self, input_data: dict[str, Any]) -> dict[str, Any]:
+        found = self._scan(input_data)
+        wanted = {str(t).lower() for t in (input_data.get("types") or [])}
+        state = dict(input_data.get("state") or {})
+        state["seen"] = list(state.get("seen") or []) + list(input_data.get("knownLeaflets") or [])
+        return v11.build_run_result(found, wanted, state, lambda it: tesco.leaflet_key(it["type"], it["from"], it["to"]))
 
     def terminate(self) -> bool:
         self.terminate_requested.set()
